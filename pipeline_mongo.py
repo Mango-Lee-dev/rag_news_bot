@@ -1,9 +1,15 @@
 import config as app_config
 import openai
-import time
 from gdeltdoc import GdeltDoc, Filters  # type: ignore[import-untyped]
 from gdeltdoc.errors import RateLimitError  # type: ignore[import-untyped]
 from newspaper import Article, Config
+from pymongo import MongoClient
+import datetime
+
+client = MongoClient(host="localhost", port=27017)
+
+db = client['project1']
+collection = db['newsAnalysis']
 
 open_ai_key = app_config.OPEN_AI_API_KEY
 openai.api_key = open_ai_key
@@ -19,63 +25,70 @@ news_config.browser_user_agent = (
 gd = GdeltDoc()
 
 def chatgpt_generate(query):
-  response = openai.chat.completions.create(
-    model=model,
-    messages=[{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": query}]
-  )
-  return response.choices[0].message.content
 
-def get_url(keyword, max_retries=3):
-  f = Filters(
-      keyword=keyword,
-      start_date="2025-01-01",
-      end_date="2025-03-31",
-      num_records=10,
-      domain="techcrunch.com",
-      country="US",
-  )
-  for attempt in range(max_retries):
-    try:
-      articles = gd.article_search(f)
-      if articles.empty:
-        print(f"[Retry {attempt+1}/{max_retries}] 빈 결과 반환, 60초 대기...")
-        time.sleep(60)
-        continue
-      return articles
-    except RateLimitError:
-      print(f"[Retry {attempt+1}/{max_retries}] Rate limit, 60초 대기...")
-      time.sleep(60)
-  print("GDELT API 결과를 가져오지 못했습니다.")
-  return None
+    messages = [{
+        "role": "system",
+        "content": "You are a helpful assistant."
+    },{   
+        "role": "user",
+        "content": query}]
 
-prompt = f'''
-  아래 뉴스에서 기업명을 모두 추출하고, 기업에 해당하는 감성을 분석하시오.
-  출력 포맷은 다음과 같습니다.
-  반드시 출력포맷만을 생성하고, 다른 텍스트는 생성하지 마시오.
-  [{{"organization": <기업명>, "positive": 0 ~ 1, "negative": 0 ~ 1, "neutral": 0 ~ 1}}, ...]
-  뉴스: '''
+    response = openai.chat.completions.create(model=model, messages=messages)
+    answer = response.choices[0].message.content
+    return answer
+
+def get_url(keyword):
+    f = Filters(
+        start_date = "2024-03-20",
+        end_date = "2024-03-25",
+        num_records = 10,
+        keyword = keyword,
+        domain = "techcrunch.com",
+        country = "US",
+    )
+    
+    articles = gd.article_search(f)
+    return articles
 
 def url_crawling(df):
-  urls = df["url"]
-  titles = df["title"]
-  texts = []
-  for url in urls:
-    try:
-      article = Article(url, config=news_config)
-      article.download()
-      article.parse()
-      texts.append(article.text)
-    except Exception as e:
-      print(f"[SKIP] {url} - {e}")
-  return texts
+    urls = df["url"]
+    titles = df["title"]
+    texts = []
+    for url in urls:
+        article = Article(url)
+        article.download()
+        article.parse()
+        texts.append(article.text)
+    return texts, titles
 
-result = []
-orgs = ['microsoft', 'apple']
+def analysis():
+    prompt = '''아래 뉴스에서 S&P500에 상장된 기업명을 모두 추출하고, 기업에 해당하는 감성을 분석하시오.
+    각 감성에 스코어링을 하시오. 각 스코어의 합은 1이 되어야 합니다. 소수점 첫번째까지만 생성하세요.
+    출력포맷은 리스트이며, 세부 내용은 다음과 같습니다.
+    반드시 출력포맷만을 생성하시오. 그 이외의 단어나 설명은 생성하지마시오.
+    [{"organization": <기업명>, "positive": 0~1, "negative": 0~1, "neutral": 0~1}, ...]
 
-for org in orgs:
-  df = get_url(org)
-  texts = url_crawling(df)
-  for text in texts:
-    result.append(chatgpt_generate(prompt + text))
+    뉴스: '''
 
-print(result)
+    orgs = ["microsoft", "apple", "tesla"]
+    for org in orgs:
+        df = get_url(org)
+        dates = df['seendate']
+        texts, titles= url_crawling(df)
+        for idx, text in enumerate(texts):
+            news_item = {}
+            answer = chatgpt_generate(prompt + text)
+            try:
+                answer_list = eval(answer)
+                news_item["text"] = text
+                news_item["title"] = titles[idx]
+                [item.update({"seendate": dates[idx]}) for item in answer_list]
+                news_item["sentiments"] = answer_list
+                news_item["date"] = datetime.datetime.now()
+                insert_id = collection.insert_one(news_item)
+                print(insert_id)
+            except:
+                continue
+    return
+
+analysis()
