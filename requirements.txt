@@ -4,3 +4,4 @@ accelerate
 gdeltdoc
 newspaper3k
 lxml_html_clean
+spacy>=3.0.0
